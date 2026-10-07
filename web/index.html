@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hangman agent</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #1c1915;
+      --paper: #f4efe6;
+      --rule: #d9d0c3;
+      --miss: #9c2f2f;
+      --hit: #1f6b4a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font: 18px/1.45 "Iowan Old Style", Palatino, Georgia, serif;
+    }
+    main {
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 32px 20px 64px;
+    }
+    h1 {
+      font-weight: 600;
+      font-size: 42px;
+      letter-spacing: -0.03em;
+      margin: 0 0 8px;
+    }
+    .lede { margin: 0 0 28px; max-width: 40em; }
+    form {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }
+    input {
+      font: inherit;
+      padding: 10px 12px;
+      border: 1px solid var(--ink);
+      background: white;
+      min-width: 0;
+      flex: 1 1 220px;
+    }
+    button, .chip {
+      font: 15px/1 "Iowan Old Style", Palatino, Georgia, serif;
+      padding: 12px 14px;
+      border: 1px solid var(--ink);
+      background: var(--ink);
+      color: var(--paper);
+      cursor: pointer;
+    }
+    .chip {
+      background: transparent;
+      color: var(--ink);
+    }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 28px; }
+    .board {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      min-height: 64px;
+      margin: 12px 0 18px;
+    }
+    .cell {
+      width: 42px;
+      height: 52px;
+      border-bottom: 2px solid var(--ink);
+      text-align: center;
+      font-size: 32px;
+      text-transform: uppercase;
+    }
+    .meta { display: flex; gap: 28px; flex-wrap: wrap; margin-bottom: 12px; }
+    .meta b { font-size: 28px; font-variant-numeric: tabular-nums; }
+    .miss b { color: var(--miss); }
+    .guesses { display: flex; flex-wrap: wrap; gap: 6px; min-height: 34px; }
+    .guess {
+      width: 32px;
+      height: 32px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      border: 1px solid var(--rule);
+      text-transform: uppercase;
+      font-size: 16px;
+    }
+    .guess.hit { border-color: var(--hit); color: var(--hit); }
+    .guess.miss { border-color: var(--miss); color: var(--miss); text-decoration: line-through; }
+    .result { min-height: 1.4em; margin-top: 16px; }
+    .error { color: var(--miss); }
+    footer { margin-top: 36px; color: #5c564c; font-size: 15px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Hangman</h1>
+    <p class="lede">
+      The agent names one letter at a time. It is scored on the
+      393,972-word lexicon, and on that list it is never wrong more times
+      than the length allows. Two-letter words force 23 misses. The agent meets 23,
+      which is the minimum.
+    </p>
+    <form id="form">
+      <input id="word" name="word" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Type a word" aria-label="Secret word">
+      <button type="submit">Solve</button>
+    </form>
+    <div class="chips" id="chips"></div>
+    <div class="meta">
+      <div class="miss">Wrong guesses <b id="misses">–</b></div>
+      <div>Allowed for this length <b id="budget">–</b></div>
+      <div>Still possible <b id="left">–</b></div>
+    </div>
+    <div class="board" id="board" aria-live="polite"></div>
+    <div class="guesses" id="guesses"></div>
+    <p class="result" id="result"></p>
+    <footer>
+      Six misses are not enough: 17,892 of these words would hang a six-stroke gallows.
+      The proof that none of them hang this agent is <code>cargo run --release -- verify</code>.
+    </footer>
+  </main>
+  <script type="module">
+    import { WORST_MISSES, buildLexicon, play } from "./agent.js";
+
+    const board = document.querySelector("#board");
+    const guessesEl = document.querySelector("#guesses");
+    const missesEl = document.querySelector("#misses");
+    const budgetEl = document.querySelector("#budget");
+    const leftEl = document.querySelector("#left");
+    const resultEl = document.querySelector("#result");
+    const wordInput = document.querySelector("#word");
+    const chips = document.querySelector("#chips");
+
+    const samples = ["jazz", "yr", "zat", "buzzing", "mummeries", "a"];
+    for (const sample of samples) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "chip";
+      button.textContent = sample;
+      button.addEventListener("click", () => {
+        wordInput.value = sample;
+        solve(sample);
+      });
+      chips.appendChild(button);
+    }
+
+    let lex = null;
+    let timer = 0;
+    const ready = fetch("../data/words.txt")
+      .then((res) => res.text())
+      .then((text) => {
+        lex = buildLexicon(text);
+      });
+
+    document.querySelector("#form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      solve(wordInput.value);
+    });
+
+    function solve(raw) {
+      clearTimeout(timer);
+      resultEl.className = "result";
+      resultEl.textContent = "Solving…";
+      board.replaceChildren();
+      guessesEl.replaceChildren();
+      missesEl.textContent = "–";
+      budgetEl.textContent = "–";
+      leftEl.textContent = "–";
+      ready.then(() => {
+        const line = play(lex, raw);
+        if (line.error) {
+          resultEl.className = "result error";
+          resultEl.textContent = line.error === "not in the lexicon"
+            ? "That string is not in the lexicon, so the guarantee does not cover it."
+            : "Enter a word made of letters.";
+          return;
+        }
+        const budget = WORST_MISSES[line.word.length];
+        budgetEl.textContent = String(budget);
+        const revealed = Array.from(line.word, () => "");
+        drawBoard(revealed);
+        leftEl.textContent = String(line.startAlive);
+        let step = 0;
+        const tick = () => {
+          if (step > 0) {
+            const guess = line.guesses[step - 1];
+            const pill = document.createElement("span");
+            pill.className = "guess " + (guess.hit ? "hit" : "miss");
+            pill.textContent = guess.letter;
+            guessesEl.appendChild(pill);
+            leftEl.textContent = String(guess.alive);
+            if (guess.hit) {
+              for (let i = 0; i < line.word.length; i++) {
+                if (line.word[i] === guess.letter) revealed[i] = guess.letter;
+              }
+              drawBoard(revealed);
+            }
+          }
+          const shown = line.guesses.slice(0, step);
+          const misses = shown.filter((g) => !g.hit).length;
+          missesEl.textContent = String(misses);
+          if (step >= line.guesses.length) {
+            for (let i = 0; i < revealed.length; i++) revealed[i] = line.word[i];
+            drawBoard(revealed);
+            const ok = misses <= budget;
+            resultEl.textContent = ok
+              ? `Solved ${line.word}. ${misses} wrong ${misses === 1 ? "guess" : "guesses"}, limit ${budget}.`
+              : `Over the limit: ${misses} misses, limit ${budget}.`;
+            return;
+          }
+          step += 1;
+          timer = setTimeout(tick, 140);
+        };
+        tick();
+      }).catch(() => {
+        resultEl.className = "result error";
+        resultEl.textContent = "Could not load the word list.";
+      });
+    }
+
+    function drawBoard(letters) {
+      board.replaceChildren();
+      for (const letter of letters) {
+        const cell = document.createElement("div");
+        cell.className = "cell";
+        cell.textContent = letter;
+        board.appendChild(cell);
+      }
+    }
+  </script>
+</body>
+</html>
